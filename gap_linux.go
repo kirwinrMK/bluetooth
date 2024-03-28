@@ -397,7 +397,6 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 	defer d.adapter.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
 	defer d.adapter.bus.RemoveSignal(signal)
 	for sig := range signal {
-		fmt.Println(sig)
 		select {
 		case <-cancelChan:
 			return

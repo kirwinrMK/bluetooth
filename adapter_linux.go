@@ -46,6 +46,16 @@ func (a *Adapter) Enable() (err error) {
 	a.bus = bus
 	a.bluez = a.bus.Object("org.bluez", dbus.ObjectPath("/"))
 	a.adapter = a.bus.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+a.id))
+	// restart the adapter
+	err = a.adapter.Call("org.freedesktop.DBus.Properties.Set", 0, "org.bluez.Adapter1", "Powered", dbus.MakeVariant(false)).Store()
+	if err != nil {
+		return fmt.Errorf("could not disable BlueZ adapter: %w", err)
+	}
+	err = a.adapter.Call("org.freedesktop.DBus.Properties.Set", 0, "org.bluez.Adapter1", "Powered", dbus.MakeVariant(true)).Store()
+	if err != nil {
+		return fmt.Errorf("could not enable BlueZ adapter: %w", err)
+	}
+	// get the adapter address
 	addr, err := a.adapter.GetProperty("org.bluez.Adapter1.Address")
 	if err != nil {
 		if err, ok := err.(dbus.Error); ok && err.Name == "org.freedesktop.DBus.Error.UnknownObject" {
@@ -56,8 +66,8 @@ func (a *Adapter) Enable() (err error) {
 	addr.Store(&a.address)
 	
 	// Add a match for properties changed signals
-	propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
-	a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
+	// propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
+	// a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
 
 	return nil
 }

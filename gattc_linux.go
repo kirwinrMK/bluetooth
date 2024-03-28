@@ -130,10 +130,11 @@ func (d Device) DiscoverServices(uuids []UUID) ([]DeviceService, error) {
 // device.
 type DeviceCharacteristic struct {
 	uuidWrapper
-	adapter                      *Adapter
-	characteristic               dbus.BusObject
-	property                     chan *dbus.Signal // channel where notifications are reported
-	propertiesChangedMatchOption dbus.MatchOption  // the same value must be passed to RemoveMatchSignal
+	adapter                       *Adapter
+	characteristic                dbus.BusObject
+	property                      chan *dbus.Signal  // channel where notifications are reported
+	propertiesChangedMatchOptions []dbus.MatchOption // the same value must be passed to RemoveMatchSignal
+	characteristicPath            string
 }
 
 // UUID returns the UUID for this DeviceCharacteristic.
@@ -180,16 +181,17 @@ func (s DeviceService) DiscoverCharacteristics(uuids []UUID) ([]DeviceCharacteri
 		}
 		cuuid, _ := ParseUUID(properties["UUID"].Value().(string))
 		char := DeviceCharacteristic{
-			uuidWrapper:    cuuid,
-			adapter:        s.adapter,
-			characteristic: s.adapter.bus.Object("org.bluez", dbus.ObjectPath(objectPath)),
+			uuidWrapper:        cuuid,
+			adapter:            s.adapter,
+			characteristic:     s.adapter.bus.Object("org.bluez", dbus.ObjectPath(objectPath)),
+			characteristicPath: objectPath,
 		}
 
 		if len(uuids) > 0 {
 			// The caller wants to get a list of characteristics in a specific
 			// order. Check whether this is one of those.
 			for i, uuid := range uuids {
-				if chars[i] != (DeviceCharacteristic{}) {
+				if !chars[i].isEmpty() {
 					// To support multiple identical characteristics, we need to
 					// ignore the characteristics that are already found. See:
 					// https://github.com/tinygo-org/bluetooth/issues/131
@@ -209,7 +211,7 @@ func (s DeviceService) DiscoverCharacteristics(uuids []UUID) ([]DeviceCharacteri
 
 	// Check that we have found all characteristics.
 	for _, char := range chars {
-		if char == (DeviceCharacteristic{}) {
+		if char.isEmpty() {
 			return nil, errors.New("bluetooth: could not find some characteristics")
 		}
 	}
@@ -245,8 +247,12 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 		// Start watching for changes in the Value property.
 		c.property = make(chan *dbus.Signal)
 		c.adapter.bus.Signal(c.property)
-		c.propertiesChangedMatchOption = dbus.WithMatchInterface("org.freedesktop.DBus.Properties")
-		c.adapter.bus.AddMatchSignal(c.propertiesChangedMatchOption)
+		// c.propertiesChangedMatchOption = dbus.WithMatchInterface("org.freedesktop.DBus.Properties")
+		c.propertiesChangedMatchOptions = []dbus.MatchOption{
+			dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+			dbus.WithMatchObjectPath(dbus.ObjectPath(c.characteristicPath)),
+		}
+		c.adapter.bus.AddMatchSignal(c.propertiesChangedMatchOptions...)
 
 		err := c.characteristic.Call("org.bluez.GattCharacteristic1.StartNotify", 0).Err
 		if err != nil {
@@ -278,7 +284,7 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 			return nil
 		}
 
-		err := c.adapter.bus.RemoveMatchSignal(c.propertiesChangedMatchOption)
+		err := c.adapter.bus.RemoveMatchSignal(c.propertiesChangedMatchOptions...)
 		c.adapter.bus.RemoveSignal(c.property)
 		c.property = nil
 		return err
@@ -304,4 +310,9 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	}
 	copy(data, result)
 	return len(result), nil
+}
+
+// IsEmpty returns true if the characteristic is empty.
+func (c DeviceCharacteristic) isEmpty() bool {
+	return c.characteristic == nil
 }

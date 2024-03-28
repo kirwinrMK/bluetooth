@@ -350,6 +350,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	signal := make(chan *dbus.Signal)
 	a.bus.Signal(signal)
 
+
 	var connectChan chan struct{}
 	cancelChan := make(chan struct{})
 
@@ -388,8 +389,15 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
 	// signal := make(chan *dbus.Signal)
 	// d.adapter.bus.Signal(signal)
+	propertiesChangedMatchOptions := []dbus.MatchOption{
+		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+		dbus.WithMatchObjectPath(d.device.Path()),
+	}
+	d.adapter.bus.AddMatchSignal(propertiesChangedMatchOptions...)
+	defer d.adapter.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
 	defer d.adapter.bus.RemoveSignal(signal)
 	for sig := range signal {
+		fmt.Println(sig)
 		select {
 		case <-cancelChan:
 			return

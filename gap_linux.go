@@ -347,26 +347,31 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		return Device{}, err
 	}
+	signal := make(chan *dbus.Signal)
+	a.bus.Signal(signal)
+
+	var connectChan chan struct{}
+	cancelChan := make(chan struct{})
 
 	// Connect to the device, if not already connected.
 	if !connected.Value().(bool) {
 		// Already start watching for property changes. We do this before reading
 		// the Connected property below to avoid a race condition: if the device
 		// were connected between the two calls the signal wouldn't be picked up.
-		signal := make(chan *dbus.Signal)
-		a.bus.Signal(signal)
-
-		// Wait until the device has connected.
-		connectChan := make(chan struct{})
-		go device.watchForPropertyChanges(signal, connectChan)
+		connectChan = make(chan struct{})
+		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
 
 		// Start connecting (async).
 		err := device.device.Call("org.bluez.Device1.Connect", 0).Err
 		if err != nil {
+			close(cancelChan)
 			return Device{}, fmt.Errorf("bluetooth: failed to connect: %w", err)
 		}
 
 		<-connectChan
+	} else {
+		device.Connected = true
+		device.watchForPropertyChanges(signal, connectChan, cancelChan)
 	}
 
 	return device, nil
@@ -380,29 +385,34 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 // Parameters:
 //   - signal: A channel of dbus signals to listen for property change signals.
 //   - connectChan: A channel used to notify when the device is connected.
-func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}) {
+func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
 	// signal := make(chan *dbus.Signal)
 	// d.adapter.bus.Signal(signal)
 	defer d.adapter.bus.RemoveSignal(signal)
 	for sig := range signal {
-		switch sig.Name {
-		case "org.freedesktop.DBus.Properties.PropertiesChanged":
-			interfaceName := sig.Body[0].(string)
-			if interfaceName != "org.bluez.Device1" {
-				continue
-			}
-			if sig.Path != d.device.Path() {
-				continue
-			}
-			changes := sig.Body[1].(map[string]dbus.Variant)
-			if connected, ok := changes["Connected"].Value().(bool); ok {
-				go d.adapter.connectHandler(d, connected)
-				if connected {
-					d.Connected = true
-					close(connectChan)
-				} else {
-					d.Connected = false
-					return
+		select {
+		case <-cancelChan:
+			return
+		default:
+			switch sig.Name {
+			case "org.freedesktop.DBus.Properties.PropertiesChanged":
+				interfaceName := sig.Body[0].(string)
+				if interfaceName != "org.bluez.Device1" {
+					continue
+				}
+				if sig.Path != d.device.Path() {
+					continue
+				}
+				changes := sig.Body[1].(map[string]dbus.Variant)
+				if connected, ok := changes["Connected"].Value().(bool); ok {
+					go d.adapter.connectHandler(d, connected)
+					if connected {
+						d.Connected = true
+						close(connectChan)
+					} else {
+						d.Connected = false
+						return
+					}
 				}
 			}
 		}

@@ -66,8 +66,8 @@ func (a *Adapter) Enable() (err error) {
 	addr.Store(&a.address)
 	
 	// Add a match for properties changed signals
-	// propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
-	// a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
+	propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
+	a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
 
 	return nil
 }

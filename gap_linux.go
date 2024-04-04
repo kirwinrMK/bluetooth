@@ -230,6 +230,17 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 			if err != nil {
 				return err
 			}
+			// wait for the scan to stop
+			for {
+				discovering, err := a.adapter.GetProperty("org.bluez.Adapter1.Discovering")
+				if err != nil {
+					return err
+				}
+				if !discovering.Value().(bool) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			// restart the scan
 			err = a.adapter.Call("org.bluez.Adapter1.StartDiscovery", 0).Err
 			if err != nil {

@@ -3,10 +3,12 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -357,40 +359,39 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		return Device{}, err
 	}
+	if connected.Value().(bool) {
+		// Already connected. Disconnect first.
+		err = device.Disconnect()
+		if err != nil {
+			return Device{}, fmt.Errorf("bluetooth: failed to disconnect from device: %w", err)
+		}
+	}
 	signal := make(chan *dbus.Signal)
 	a.bus.Signal(signal)
 
 	var connectChan chan struct{}
 	cancelChan := make(chan struct{})
 
-	// Connect to the device, if not already connected.
-	if !connected.Value().(bool) {
-		// Trust the device, so that we don't have to pair with it.
-		err = device.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
-		if err != nil {
-			return Device{}, fmt.Errorf("bluetooth: failed to trust device: %w", err)
-		}
-
-		// Already start watching for property changes. We do this before reading
-		// the Connected property below to avoid a race condition: if the device
-		// were connected between the two calls the signal wouldn't be picked up.
-		connectChan = make(chan struct{})
-		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
-
-		// Start connecting (async).
-		err = device.device.Call("org.bluez.Device1.Connect", 0).Err
-		if err != nil {
-			close(cancelChan)
-			return Device{}, fmt.Errorf("bluetooth: failed to connect: %w", err)
-		}
-
-		<-connectChan
-	} else {
-		fmt.Println("Device already connected")
-		device.Connected = true
-		a.scanRestartChan <- true
-		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
+	// Trust the device, so that we don't have to pair with it.
+	err = device.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
+	if err != nil {
+		return Device{}, fmt.Errorf("bluetooth: failed to trust device: %w", err)
 	}
+
+	// Already start watching for property changes. We do this before reading
+	// the Connected property below to avoid a race condition: if the device
+	// were connected between the two calls the signal wouldn't be picked up.
+	connectChan = make(chan struct{})
+	go device.watchForPropertyChanges(signal, connectChan, cancelChan)
+
+	// Start connecting (async).
+	err = device.device.Call("org.bluez.Device1.Connect", 0).Err
+	if err != nil {
+		close(cancelChan)
+		return Device{}, fmt.Errorf("bluetooth: failed to connect: %w", err)
+	}
+
+	<-connectChan
 
 	return device, nil
 }
@@ -451,7 +452,9 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 func (d Device) Disconnect() error {
 	// we don't call our cancel function here, instead we wait for the
 	// property change in `watchForConnect` and cancel things then
-	return d.device.Call("org.bluez.Device1.Disconnect", 0).Err
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	return d.device.CallWithContext(ctx, "org.bluez.Device1.Disconnect", 0).Err
 }
 
 // RequestConnectionParams requests a different connection latency and timeout

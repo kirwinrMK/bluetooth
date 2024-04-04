@@ -388,6 +388,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	} else {
 		fmt.Println("Device already connected")
 		device.Connected = true
+		a.scanRestartChan <- true
 		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
 	}
 

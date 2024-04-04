@@ -22,6 +22,7 @@ type Adapter struct {
 	adapter              dbus.BusObject // object at /org/bluez/hciX
 	address              string
 	defaultAdvertisement *Advertisement
+	scanRestartChan      chan bool
 
 	connectHandler func(device Device, connected bool)
 }
@@ -47,27 +48,6 @@ func (a *Adapter) Enable() (err error) {
 	a.bluez = a.bus.Object("org.bluez", dbus.ObjectPath("/"))
 	a.adapter = a.bus.Object("org.bluez", dbus.ObjectPath("/org/bluez/"+a.id))
 
-	// get a list of connected devices
-	obj := a.bus.Object("org.bluez", "/")
-    var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-    err = obj.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&objects)
-    if err != nil {
-        return err
-    }
-	// remove all devices
-	for path := range objects {
-		// fmt.Println(objects[path])
-		// if the device is a peripheral, remove it
-		if objects[path]["org.bluez.Device1"]!= nil {
-			// remove device
-			obj := a.bus.Object("org.bluez", "/org/bluez/hci0")
-			err = obj.Call("org.bluez.Adapter1.RemoveDevice", 0, path).Store()
-			if err != nil {
-				return err
-			}
-		}
-	}
-
 	// get the adapter address
 	addr, err := a.adapter.GetProperty("org.bluez.Adapter1.Address")
 	if err != nil {
@@ -77,10 +57,6 @@ func (a *Adapter) Enable() (err error) {
 		return fmt.Errorf("could not activate BlueZ adapter: %w", err)
 	}
 	addr.Store(&a.address)
-	
-	// Add a match for properties changed signals
-	// propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
-	// a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
 
 	return nil
 }

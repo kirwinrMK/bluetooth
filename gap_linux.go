@@ -144,6 +144,9 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 	cancelChan := make(chan struct{})
 	a.scanCancelChan = cancelChan
 
+	// Make scan restart channel.
+	a.scanRestartChan = make(chan bool)
+
 	// This appears to be necessary to receive any BLE discovery results at all.
 	defer a.adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0)
 	err := a.adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0, map[string]interface{}{
@@ -157,24 +160,35 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 	a.bus.Signal(signal)
 	defer a.bus.RemoveSignal(signal)
 
-	// propertiesChangedMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.Properties")}
-	// a.bus.AddMatchSignal(propertiesChangedMatchOptions...)
-	// defer a.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
-
 	newObjectMatchOptions := []dbus.MatchOption{dbus.WithMatchInterface("org.freedesktop.DBus.ObjectManager")}
 	a.bus.AddMatchSignal(newObjectMatchOptions...)
 	defer a.bus.RemoveMatchSignal(newObjectMatchOptions...)
+
+	// Check if the adapter is already discovering
+	discovering, err := a.adapter.GetProperty("org.bluez.Adapter1.Discovering")
+	if err != nil {
+		return err
+	}
+	// if it is discovering, stop it
+	if discovering.Value().(bool) {
+		err = a.adapter.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
+		if err != nil {
+			return err
+		}
+	}
 
 	// Go through all connected devices and present the connected devices as
 	// scan results. Also save the properties so that the full list of
 	// properties is known on a PropertiesChanged signal. We can't present the
 	// list of cached devices as scan results as devices may be cached for a
 	// long time, long after they have moved out of range.
+
 	var deviceList map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	err = a.bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&deviceList)
 	if err != nil {
 		return err
 	}
+
 	devices := make(map[dbus.ObjectPath]map[string]dbus.Variant)
 	for path, v := range deviceList {
 		device, ok := v["org.bluez.Device1"]
@@ -184,13 +198,11 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 		if !strings.HasPrefix(string(path), string(a.adapter.Path())) {
 			continue // not part of our adapter
 		}
-		if device["Connected"].Value().(bool) {
-			callback(a, makeScanResult(device))
-			select {
-			case <-cancelChan:
-				return nil
-			default:
-			}
+		callback(a, makeScanResult(device))
+		select {
+		case <-cancelChan:
+			return nil
+		default:
 		}
 		devices[path] = device
 	}
@@ -209,6 +221,18 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 		select {
 		case <-cancelChan:
 			return a.adapter.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
+		// check for a resart signal
+		case <-a.scanRestartChan:
+			// stop the current scan
+			err = a.adapter.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
+			if err != nil {
+				return err
+			}
+			// restart the scan
+			err = a.adapter.Call("org.bluez.Adapter1.StartDiscovery", 0).Err
+			if err != nil {
+				return err
+			}
 		default:
 		}
 
@@ -226,28 +250,14 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 				}
 				devices[objectPath] = rawprops
 				callback(a, makeScanResult(rawprops))
-			case "org.freedesktop.DBus.Properties.PropertiesChanged":
-				interfaceName := sig.Body[0].(string)
-				if interfaceName != "org.bluez.Device1" {
-					continue
-				}
-				changes := sig.Body[1].(map[string]dbus.Variant)
-				device, ok := devices[sig.Path]
-				if !ok {
-					// This shouldn't happen, but protect against it just in
-					// case.
-					continue
-				}
-				for k, v := range changes {
-					device[k] = v
-				}
-				callback(a, makeScanResult(device))
+			case "org.freedesktop.DBus.ObjectManager.InterfacesRemoved":
+				objectPath := sig.Body[0].(dbus.ObjectPath)
+				delete(devices, objectPath)
 			}
 		case <-cancelChan:
 			continue
 		}
 	}
-
 	// unreachable
 }
 
@@ -350,12 +360,17 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	signal := make(chan *dbus.Signal)
 	a.bus.Signal(signal)
 
-
 	var connectChan chan struct{}
 	cancelChan := make(chan struct{})
 
 	// Connect to the device, if not already connected.
 	if !connected.Value().(bool) {
+		// Trust the device, so that we don't have to pair with it.
+		err = device.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
+		if err != nil {
+			return Device{}, fmt.Errorf("bluetooth: failed to trust device: %w", err)
+		}
+
 		// Already start watching for property changes. We do this before reading
 		// the Connected property below to avoid a race condition: if the device
 		// were connected between the two calls the signal wouldn't be picked up.
@@ -363,7 +378,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
 
 		// Start connecting (async).
-		err := device.device.Call("org.bluez.Device1.Connect", 0).Err
+		err = device.device.Call("org.bluez.Device1.Connect", 0).Err
 		if err != nil {
 			close(cancelChan)
 			return Device{}, fmt.Errorf("bluetooth: failed to connect: %w", err)
@@ -371,8 +386,9 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 
 		<-connectChan
 	} else {
+		fmt.Println("Device already connected")
 		device.Connected = true
-		device.watchForPropertyChanges(signal, connectChan, cancelChan)
+		go device.watchForPropertyChanges(signal, connectChan, cancelChan)
 	}
 
 	return device, nil
@@ -416,6 +432,8 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 					if connected {
 						d.Connected = true
 						close(connectChan)
+						// restart the scan because on some devices the scan stops when a device is connected
+						d.adapter.scanRestartChan <- true
 					} else {
 						d.Connected = false
 						return

@@ -135,7 +135,7 @@ func (a *Advertisement) Stop() error {
 // behavior as if the actual packets were observed, but it has flaws: it is
 // possible some events are missed and perhaps even possible that some events
 // are duplicated.
-func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
+func (a *Adapter) Scan(callback func(*Adapter, ScanResult), uuids []UUID) error {
 	if a.scanCancelChan != nil {
 		return errScanning
 	}
@@ -149,10 +149,17 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) error {
 	// Make scan restart channel.
 	a.scanRestartChan = make(chan bool)
 
+	// Convert UUIDs to strings.
+	var uuidsStr []string
+	for _, uuid := range uuids {
+		uuidsStr = append(uuidsStr, uuid.String())
+	}
+
 	// This appears to be necessary to receive any BLE discovery results at all.
 	defer a.adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0)
 	err := a.adapter.Call("org.bluez.Adapter1.SetDiscoveryFilter", 0, map[string]interface{}{
 		"Transport": "le",
+		"UUIDs":     uuidsStr,
 	}).Err
 	if err != nil {
 		return err
@@ -354,10 +361,8 @@ type Device struct {
 }
 
 // Connect starts a connection attempt to the given peripheral device address.
-//
-// On Linux and Windows, the IsRandom part of the address is ignored.
 func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, error) {
-	devicePath := dbus.ObjectPath(string(a.adapter.Path()) + "/dev_" + strings.Replace(address.MAC.String(), ":", "_", -1))
+	devicePath := a.generateDevicePath(address)
 	device := Device{
 		Address:   address,
 		device:    a.bus.Object("org.bluez", devicePath),
@@ -366,45 +371,73 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	}
 
 	// Read whether this device is already connected.
-	connected, err := device.device.GetProperty("org.bluez.Device1.Connected")
+	err := device.ensureDisconnected()
 	if err != nil {
-		return Device{}, err
+		return Device{}, fmt.Errorf("bluetooth: failed to ensure device is disconnected: %w", err)
 	}
-	if connected.Value().(bool) {
-		// Already connected. Disconnect first.
-		err = device.Disconnect()
-		if err != nil {
-			return Device{}, fmt.Errorf("bluetooth: failed to disconnect from device: %w", err)
-		}
-	}
-	signal := make(chan *dbus.Signal)
-	a.bus.Signal(signal)
-
-	var connectChan chan struct{}
-	cancelChan := make(chan struct{})
 
 	// Trust the device, so that we don't have to pair with it.
-	err = device.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
+	err = device.trustDevice()
 	if err != nil {
 		return Device{}, fmt.Errorf("bluetooth: failed to trust device: %w", err)
 	}
 
-	// Already start watching for property changes. We do this before reading
-	// the Connected property below to avoid a race condition: if the device
-	// were connected between the two calls the signal wouldn't be picked up.
-	connectChan = make(chan struct{})
-	go device.watchForPropertyChanges(signal, connectChan, cancelChan)
+	connectChan, cancelChan := device.watchForConnection()
 
-	// Start connecting (async).
-	err = device.device.Call("org.bluez.Device1.Connect", 0).Err
+	// Connect to the device.
+	err = device.connect()
 	if err != nil {
 		close(cancelChan)
-		return Device{}, fmt.Errorf("bluetooth: failed to connect: %w", err)
+		return Device{}, fmt.Errorf("bluetooth: failed to connect to device: %w", err)
 	}
 
 	<-connectChan
 
 	return device, nil
+}
+
+// trustDevice trusts the device so that we don't have to pair with it.
+func (d Device) trustDevice() error {
+	return d.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
+}
+
+// generateDevicePath generates a unique device path for the given address.
+func (a *Adapter) generateDevicePath(address Address) dbus.ObjectPath {
+	return dbus.ObjectPath(string(a.adapter.Path()) + "/dev_" + strings.Replace(address.MAC.String(), ":", "_", -1))
+}
+
+// ensureDisconnected ensures that the device is disconnected.
+func (d Device) ensureDisconnected() error {
+	// Read whether this device is already connected.
+	connected, err := d.device.GetProperty("org.bluez.Device1.Connected")
+	if err != nil {
+		return err
+	}
+	if connected.Value().(bool) {
+		// Already connected. Disconnect first.
+		err = d.Disconnect()
+		if err != nil {
+			return fmt.Errorf("bluetooth: failed to disconnect from device: %w", err)
+		}
+	}
+	return nil
+}
+
+// watchForConnection watches for the connection status of the device and calls the appropriate connectHandler function
+func (d Device) watchForConnection() (connectChan chan struct{}, cancelChan chan struct{}) {
+	signal := make(chan *dbus.Signal)
+	d.adapter.bus.Signal(signal)
+	connectChan = make(chan struct{})
+	cancelChan = make(chan struct{})
+	go d.watchForPropertyChanges(signal, connectChan, cancelChan)
+	return connectChan, cancelChan
+}
+
+// connect attempts to connect to the device
+func (d Device) connect() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	defer cancel()
+	return d.device.CallWithContext(ctx, "org.bluez.Device1.Connect", 0).Err
 }
 
 // watchForPropertyChanges listens for property change signals on the given channel and handles them accordingly.
@@ -416,8 +449,6 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 //   - signal: A channel of dbus signals to listen for property change signals.
 //   - connectChan: A channel used to notify when the device is connected.
 func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
-	// signal := make(chan *dbus.Signal)
-	// d.adapter.bus.Signal(signal)
 	propertiesChangedMatchOptions := []dbus.MatchOption{
 		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 		dbus.WithMatchObjectPath(d.device.Path()),
@@ -425,37 +456,46 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 	d.adapter.bus.AddMatchSignal(propertiesChangedMatchOptions...)
 	defer d.adapter.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
 	defer d.adapter.bus.RemoveSignal(signal)
-	for sig := range signal {
+
+	for {
 		select {
 		case <-cancelChan:
 			return
-		default:
-			switch sig.Name {
-			case "org.freedesktop.DBus.Properties.PropertiesChanged":
-				interfaceName := sig.Body[0].(string)
-				if interfaceName != "org.bluez.Device1" {
+		case sig := <-signal:
+			if sig.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
+				continue
+			}
+			interfaceName, changes := parseSignal(sig)
+			if interfaceName != "org.bluez.Device1" {
+				continue
+			}
+			if sig.Path != d.device.Path() {
+				continue
+			}
+			if connected, ok := changes["Connected"].Value().(bool); ok {
+				if connected == d.Connected {
 					continue
 				}
-				if sig.Path != d.device.Path() {
-					continue
+				go d.adapter.connectHandler(d, connected)
+				d.Connected = connected
+				if connected {
+					close(connectChan)
+					// restart the scan because on some devices the scan stops when a device is connected
+					d.adapter.scanRestartChan <- true
+				} else {
+					return
 				}
-				changes := sig.Body[1].(map[string]dbus.Variant)
-				if connected, ok := changes["Connected"].Value().(bool); ok {
-					go d.adapter.connectHandler(d, connected)
-					if connected {
-						d.Connected = true
-						close(connectChan)
-						// restart the scan because on some devices the scan stops when a device is connected
-						d.adapter.scanRestartChan <- true
-					} else {
-						d.Connected = false
-						return
-					}
-				}
+
 			}
 		}
 	}
-	fmt.Println("Signal Killed")
+}
+
+// parseSignal parses a signal from the DBus and extracts interface name and changes map.
+func parseSignal(sig *dbus.Signal) (interfaceName string, changes map[string]dbus.Variant) {
+	interfaceName = sig.Body[0].(string)
+	changes = sig.Body[1].(map[string]dbus.Variant)
+	return
 }
 
 // Disconnect from the BLE device. This method is non-blocking and does not

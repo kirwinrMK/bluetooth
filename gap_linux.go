@@ -146,9 +146,6 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult), uuids []UUID) error 
 	cancelChan := make(chan struct{})
 	a.scanCancelChan = cancelChan
 
-	// Make scan restart channel.
-	a.scanRestartChan = make(chan bool)
-
 	// Convert UUIDs to strings.
 	var uuidsStr []string
 	for _, uuid := range uuids {
@@ -230,29 +227,6 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult), uuids []UUID) error 
 		select {
 		case <-cancelChan:
 			return a.adapter.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
-		// check for a resart signal
-		case <-a.scanRestartChan:
-			// stop the current scan
-			err = a.adapter.Call("org.bluez.Adapter1.StopDiscovery", 0).Err
-			if err != nil {
-				return err
-			}
-			// wait for the scan to stop
-			for {
-				discovering, err := a.adapter.GetProperty("org.bluez.Adapter1.Discovering")
-				if err != nil {
-					return err
-				}
-				if !discovering.Value().(bool) {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			// restart the scan
-			err = a.adapter.Call("org.bluez.Adapter1.StartDiscovery", 0).Err
-			if err != nil {
-				return err
-			}
 		default:
 		}
 
@@ -278,7 +252,6 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult), uuids []UUID) error 
 			continue
 		}
 	}
-	// unreachable
 }
 
 // StopScan stops any in-progress scan. It can be called from within a Scan
@@ -376,12 +349,6 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		return Device{}, fmt.Errorf("bluetooth: failed to ensure device is disconnected: %w", err)
 	}
 
-	// Trust the device, so that we don't have to pair with it.
-	err = device.trustDevice()
-	if err != nil {
-		return Device{}, fmt.Errorf("bluetooth: failed to trust device: %w", err)
-	}
-
 	connectChan, cancelChan := device.watchForConnection()
 
 	// Connect to the device.
@@ -394,11 +361,6 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	<-connectChan
 
 	return device, nil
-}
-
-// trustDevice trusts the device so that we don't have to pair with it.
-func (d Device) trustDevice() error {
-	return d.device.SetProperty("org.bluez.Device1.Trusted", dbus.MakeVariant(true))
 }
 
 // generateDevicePath generates a unique device path for the given address.

@@ -22,7 +22,6 @@ type Adapter struct {
 	adapter              dbus.BusObject // object at /org/bluez/hciX
 	address              string
 	defaultAdvertisement *Advertisement
-	scanRestartChan      chan bool
 
 	connectHandler func(device Device, connected bool)
 }

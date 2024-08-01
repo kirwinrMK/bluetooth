@@ -481,7 +481,7 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 				if connected {
 					close(connectChan)
 					// restart the scan because on some devices the scan stops when a device is connected
-					d.adapter.scanRestartChan <- true
+					time.Sleep(time.Second)
 				} else {
 					return
 				}

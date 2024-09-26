@@ -22,7 +22,7 @@ type uuidWrapper = UUID
 // DeviceService is a BLE service on a connected peripheral device.
 type DeviceService struct {
 	uuidWrapper
-	adapter     *Adapter
+	device      *Device
 	servicePath string
 }
 
@@ -68,7 +68,7 @@ func (d Device) DiscoverServices(uuids []UUID) ([]DeviceService, error) {
 	// Iterate through all objects managed by BlueZ, hoping to find the services
 	// we're looking for.
 	var list map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := d.adapter.bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&list)
+	err := d.bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&list)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func (d Device) DiscoverServices(uuids []UUID) ([]DeviceService, error) {
 
 		ds := DeviceService{
 			uuidWrapper: serviceUUID,
-			adapter:     d.adapter,
+			device:      &d,
 			servicePath: objectPath,
 		}
 
@@ -130,8 +130,8 @@ func (d Device) DiscoverServices(uuids []UUID) ([]DeviceService, error) {
 // device.
 type DeviceCharacteristic struct {
 	uuidWrapper
-	adapter                       *Adapter
 	characteristic                dbus.BusObject
+	device                        *Device
 	property                      chan *dbus.Signal  // channel where notifications are reported
 	propertiesChangedMatchOptions []dbus.MatchOption // the same value must be passed to RemoveMatchSignal
 	characteristicPath            string
@@ -162,7 +162,7 @@ func (s DeviceService) DiscoverCharacteristics(uuids []UUID) ([]DeviceCharacteri
 	// Iterate through all objects managed by BlueZ, hoping to find the
 	// characteristic we're looking for.
 	var list map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := s.adapter.bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&list)
+	err := s.device.bluez.Call("org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0).Store(&list)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +182,8 @@ func (s DeviceService) DiscoverCharacteristics(uuids []UUID) ([]DeviceCharacteri
 		cuuid, _ := ParseUUID(properties["UUID"].Value().(string))
 		char := DeviceCharacteristic{
 			uuidWrapper:        cuuid,
-			adapter:            s.adapter,
-			characteristic:     s.adapter.bus.Object("org.bluez", dbus.ObjectPath(objectPath)),
+			device:             s.device,
+			characteristic:     s.device.bus.Object("org.bluez", dbus.ObjectPath(objectPath)),
 			characteristicPath: objectPath,
 		}
 
@@ -246,13 +246,13 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 
 		// Start watching for changes in the Value property.
 		c.property = make(chan *dbus.Signal)
-		c.adapter.bus.Signal(c.property)
+		c.device.bus.Signal(c.property)
 		// c.propertiesChangedMatchOption = dbus.WithMatchInterface("org.freedesktop.DBus.Properties")
 		c.propertiesChangedMatchOptions = []dbus.MatchOption{
 			dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 			dbus.WithMatchObjectPath(dbus.ObjectPath(c.characteristicPath)),
 		}
-		c.adapter.bus.AddMatchSignal(c.propertiesChangedMatchOptions...)
+		c.device.bus.AddMatchSignal(c.propertiesChangedMatchOptions...)
 
 		err := c.characteristic.Call("org.bluez.GattCharacteristic1.StartNotify", 0).Err
 		if err != nil {
@@ -284,8 +284,8 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 			return nil
 		}
 
-		err := c.adapter.bus.RemoveMatchSignal(c.propertiesChangedMatchOptions...)
-		c.adapter.bus.RemoveSignal(c.property)
+		err := c.device.bus.RemoveMatchSignal(c.propertiesChangedMatchOptions...)
+		c.device.bus.RemoveSignal(c.property)
 		c.property = nil
 		return err
 	}

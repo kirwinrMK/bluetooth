@@ -329,22 +329,44 @@ type Device struct {
 	Address   Address // the MAC address of the device
 	Connected bool    // whether the device is currently connected
 
-	device  dbus.BusObject // bluez device interface
-	adapter *Adapter       // the adapter that was used to form this device connection
+	bus    *dbus.Conn     // the DBus connection
+	device dbus.BusObject // bluez device interface
+	bluez  dbus.BusObject
+
+	// connectHandler is called when the device connects or disconnects.
+	// It is set by the Adapter.
+	connectHandler func(device Device, connected bool)
 }
 
 // Connect starts a connection attempt to the given peripheral device address.
 func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, error) {
+	// create dbus connection
+	bus, err := dbus.SystemBusPrivate()
+	if err != nil {
+		return Device{}, fmt.Errorf("bluetooth: could not connect to system bus: %w", err)
+	}
+	if err = bus.Auth(nil); err != nil {
+		bus.Close()
+		return Device{}, err
+	}
+	if err = bus.Hello(); err != nil {
+		bus.Close()
+		return Device{}, err
+	}
+
 	devicePath := a.generateDevicePath(address)
+
 	device := Device{
-		Address:   address,
-		device:    a.bus.Object("org.bluez", devicePath),
-		adapter:   a,
-		Connected: false,
+		Address:        address,
+		bus:            bus,
+		device:         bus.Object("org.bluez", devicePath),
+		connectHandler: a.connectHandler,
+		bluez:          a.bluez,
+		Connected:      false,
 	}
 
 	// Read whether this device is already connected.
-	err := device.ensureDisconnected()
+	err = device.ensureDisconnected()
 	if err != nil {
 		return Device{}, fmt.Errorf("bluetooth: failed to ensure device is disconnected: %w", err)
 	}
@@ -388,7 +410,7 @@ func (d Device) ensureDisconnected() error {
 // watchForConnection watches for the connection status of the device and calls the appropriate connectHandler function
 func (d Device) watchForConnection() (connectChan chan struct{}, cancelChan chan struct{}) {
 	signal := make(chan *dbus.Signal)
-	d.adapter.bus.Signal(signal)
+	d.bus.Signal(signal)
 	connectChan = make(chan struct{})
 	cancelChan = make(chan struct{})
 	go d.watchForPropertyChanges(signal, connectChan, cancelChan)
@@ -397,7 +419,7 @@ func (d Device) watchForConnection() (connectChan chan struct{}, cancelChan chan
 
 // connect attempts to connect to the device
 func (d Device) connect() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 	return d.device.CallWithContext(ctx, "org.bluez.Device1.Connect", 0).Err
 }
@@ -415,19 +437,21 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 		dbus.WithMatchObjectPath(d.device.Path()),
 	}
-	d.adapter.bus.AddMatchSignal(propertiesChangedMatchOptions...)
-	defer d.adapter.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
-	defer d.adapter.bus.RemoveSignal(signal)
+	d.bus.AddMatchSignal(propertiesChangedMatchOptions...)
+	defer d.bus.RemoveMatchSignal(propertiesChangedMatchOptions...)
+	defer d.bus.RemoveSignal(signal)
 
 	for {
 		select {
 		case <-cancelChan:
 			return
 		case sig := <-signal:
+			// slog.Info("Signal received", "name", sig.Name, "path", sig.Path, "body", sig.Body)
 			if sig.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
 				continue
 			}
 			interfaceName, changes := parseSignal(sig)
+			// slog.Info("Signal received", "name", sig.Name, "interface", interfaceName, "path", sig.Path, "changes", changes)
 			if interfaceName != "org.bluez.Device1" {
 				continue
 			}
@@ -438,13 +462,13 @@ func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan ch
 				if connected == d.Connected {
 					continue
 				}
-				go d.adapter.connectHandler(d, connected)
+				go d.connectHandler(d, connected)
 				d.Connected = connected
 				if connected {
 					close(connectChan)
-					// restart the scan because on some devices the scan stops when a device is connected
 					time.Sleep(time.Second)
 				} else {
+					d.bus.Close()
 					return
 				}
 

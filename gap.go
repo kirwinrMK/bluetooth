@@ -8,7 +8,6 @@ import (
 var (
 	errScanning                  = errors.New("bluetooth: a scan is already in progress")
 	errNotScanning               = errors.New("bluetooth: there is no scan in progress")
-	errAdvertisementPacketTooBig = errors.New("bluetooth: advertisement packet overflows")
 )
 
 // MACAddress contains a Bluetooth address which is a MAC address.
@@ -345,13 +344,6 @@ func (buf *rawAdvertisementPayload) ServiceData() []ServiceDataElement {
 		}
 	}
 	return serviceData
-}
-
-// reset restores this buffer to the original state.
-func (buf *rawAdvertisementPayload) reset() {
-	// The data is not reset (only the length), because with a zero length the
-	// data is undefined.
-	buf.len = 0
 }
 
 // addFromOptions constructs a new advertisement payload (assumed to be empty

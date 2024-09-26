@@ -435,9 +435,7 @@ func (d Device) watchForConnection() (connectChan chan struct{}, cancelChan chan
 
 // connect attempts to connect to the device
 func (d Device) connect() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
-	defer cancel()
-	return d.device.CallWithContext(ctx, "org.bluez.Device1.Connect", 0).Err
+	return d.device.Call("org.bluez.Device1.Connect", 0).Err
 }
 
 // watchForPropertyChanges listens for property change signals on the given channel and handles them accordingly.

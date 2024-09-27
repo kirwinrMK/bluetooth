@@ -246,16 +246,11 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (*Device, er
 		Connected:  false,
 	}
 
-	connectChan, cancelChan := device.watchForConnection()
-
 	// Connect to the device.
 	err := device.connect()
 	if err != nil {
-		close(cancelChan)
 		return nil, fmt.Errorf("bluetooth: failed to connect to device: %w", err)
 	}
-
-	<-connectChan
 
 	return device, nil
 }
@@ -266,7 +261,7 @@ func (a *Adapter) generateDevicePath(address Address) dbus.ObjectPath {
 }
 
 // watchForConnection watches for the connection status of the device and calls the appropriate connectHandler function
-func (d Device) watchForConnection() (connectChan chan struct{}, cancelChan chan struct{}) {
+func (d *Device) watchForConnection() (connectChan chan struct{}, cancelChan chan struct{}) {
 	signal := make(chan *dbus.Signal)
 	d.adapter.bus.Signal(signal)
 	connectChan = make(chan struct{})
@@ -286,22 +281,26 @@ func (d *Device) connect() error {
 		return fmt.Errorf("bluetooth: failed to connect to system bus: %w", err)
 	}
 	d.bus = bus
-
+	connectChan, cancelChan := d.watchForConnection()
 	// get the device object
 	d.device = d.bus.Object("org.bluez", d.devicePath)
 	d.bluez = d.bus.Object("org.bluez", dbus.ObjectPath("/"))
 	// check if the device is already connected
 	connected, err := d.adapter.isConnected(d.devicePath)
 	if err != nil {
+		close(cancelChan)
 		return fmt.Errorf("bluetooth: failed to check if device is connected: %w", err)
 	}
 	if connected {
 		d.Connected = true
 	} else {
+
 		err = d.device.Call("org.bluez.Device1.Connect", 0).Err
 		if err != nil {
+			close(cancelChan)
 			return fmt.Errorf("bluetooth: failed to connect to device: %w", err)
 		}
+		<-connectChan
 	}
 
 	return nil
@@ -315,7 +314,7 @@ func (d *Device) connect() error {
 // Parameters:
 //   - signal: A channel of dbus signals to listen for property change signals.
 //   - connectChan: A channel used to notify when the device is connected.
-func (d Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
+func (d *Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
 	propertiesChangedMatchOptions := []dbus.MatchOption{
 		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 		dbus.WithMatchObjectPath(d.device.Path()),

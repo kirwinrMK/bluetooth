@@ -22,7 +22,7 @@ type Adapter struct {
 	adapter              dbus.BusObject // object at /org/bluez/hciX
 	address              string
 
-	connectHandler func(device Device, connected bool)
+	connectHandler func(device *Device, connected bool)
 }
 
 // DefaultAdapter is the default adapter on the system. On Linux, it is the
@@ -31,7 +31,7 @@ type Adapter struct {
 // Make sure to call Enable() before using it to initialize the adapter.
 var DefaultAdapter = &Adapter{
 	id: defaultAdapter,
-	connectHandler: func(device Device, connected bool) {
+	connectHandler: func(device *Device, connected bool) {
 	},
 }
 

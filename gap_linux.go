@@ -275,6 +275,13 @@ func (d *Device) connect() error {
 	if d.Connected {
 		return nil
 	}
+	// if the bus is already connected, close it
+	if d.bus != nil {
+		err := d.bus.Close()
+		if err != nil {
+			return fmt.Errorf("bluetooth: failed to close existing d-bus connection: %w", err)
+		}
+	}
 	// create a new d-bus connection
 	bus, err := dbus.ConnectSystemBus()
 	if err != nil {

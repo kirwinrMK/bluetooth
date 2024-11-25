@@ -305,6 +305,7 @@ func (d *Device) connect() error {
 		err = d.device.Call("org.bluez.Device1.Connect", 0).Err
 		if err != nil {
 			close(cancelChan)
+			d.bus.Close()
 			return fmt.Errorf("bluetooth: failed to connect to device: %w", err)
 		}
 		<-connectChan

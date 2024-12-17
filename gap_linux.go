@@ -393,7 +393,5 @@ func (d Device) Disconnect() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	err := d.device.CallWithContext(ctx, "org.bluez.Device1.Disconnect", 0).Err
-	d.cancel()
-
 	return err
 }

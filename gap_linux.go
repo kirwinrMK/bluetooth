@@ -5,6 +5,7 @@ package bluetooth
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -392,7 +393,9 @@ func (d Device) Disconnect() error {
 	// property change in `watchForConnect` and cancel things then
 	ctx, cancel := context.WithTimeout(d.ctx, time.Second*5)
 	defer cancel()
+	slog.Info("Disconnecting from device")
 	err := d.device.CallWithContext(ctx, "org.bluez.Device1.Disconnect", 0).Err
+	slog.Info("Disconnected from device", "err", err)
 	d.cancel()
 
 	return err

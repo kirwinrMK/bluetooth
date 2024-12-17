@@ -229,6 +229,9 @@ type Device struct {
 	Address   Address // the MAC address of the device
 	Connected bool    // whether the device is currently connected
 
+	ctx    context.Context    // the context of the device
+	cancel context.CancelFunc // cancel context function
+
 	devicePath dbus.ObjectPath // the DBus path of the device
 	bus        *dbus.Conn      // the DBus connection
 	device     dbus.BusObject  // bluez device interface
@@ -237,9 +240,12 @@ type Device struct {
 }
 
 // Connect starts a connection attempt to the given peripheral device address.
-func (a *Adapter) Connect(address Address, params ConnectionParams) (*Device, error) {
+func (a *Adapter) Connect(ctx context.Context, address Address, params ConnectionParams) (*Device, error) {
 	devicePath := a.generateDevicePath(address)
+	devCtx, cancel := context.WithCancel(ctx)
 	device := &Device{
+		ctx:        devCtx,
+		cancel:     cancel,
 		Address:    address,
 		devicePath: devicePath,
 		adapter:    a,
@@ -261,13 +267,12 @@ func (a *Adapter) generateDevicePath(address Address) dbus.ObjectPath {
 }
 
 // watchForConnection watches for the connection status of the device and calls the appropriate connectHandler function
-func (d *Device) watchForConnection() (connectChan chan struct{}, cancelChan chan struct{}) {
+func (d *Device) watchForConnection() (connectChan chan struct{}) {
 	signal := make(chan *dbus.Signal)
 	d.adapter.bus.Signal(signal)
 	connectChan = make(chan struct{})
-	cancelChan = make(chan struct{})
-	go d.watchForPropertyChanges(signal, connectChan, cancelChan)
-	return connectChan, cancelChan
+	go d.watchForPropertyChanges(signal, connectChan)
+	return connectChan
 }
 
 // connect attempts to connect to the device
@@ -275,40 +280,49 @@ func (d *Device) connect() error {
 	if d.Connected {
 		return nil
 	}
-	// if the bus is already connected, close it
-	if d.bus != nil {
-		err := d.bus.Close()
+	// check for cancelation
+	if err := d.ctx.Err(); err != nil {
+		return err
+	}
+
+	// Initialize D-Bus connection if not already connected
+	if d.bus == nil {
+		bus, err := dbus.ConnectSystemBus()
 		if err != nil {
-			return fmt.Errorf("bluetooth: failed to close existing d-bus connection: %w", err)
+			return fmt.Errorf("bluetooth: failed to connect to system bus: %w", err)
 		}
+		d.bus = bus
+
+		// Initialize D-Bus objects
+		d.device = d.bus.Object("org.bluez", d.devicePath)
+		d.bluez = d.bus.Object("org.bluez", dbus.ObjectPath("/"))
 	}
-	// create a new d-bus connection
-	bus, err := dbus.ConnectSystemBus()
-	if err != nil {
-		return fmt.Errorf("bluetooth: failed to connect to system bus: %w", err)
-	}
-	d.bus = bus
-	connectChan, cancelChan := d.watchForConnection()
-	// get the device object
-	d.device = d.bus.Object("org.bluez", d.devicePath)
-	d.bluez = d.bus.Object("org.bluez", dbus.ObjectPath("/"))
-	// check if the device is already connected
+
+	// Check if the device is already connected
 	connected, err := d.adapter.isConnected(d.devicePath)
 	if err != nil {
-		close(cancelChan)
 		return fmt.Errorf("bluetooth: failed to check if device is connected: %w", err)
 	}
+
 	if connected {
 		d.Connected = true
-	} else {
+		return nil
+	}
 
-		err = d.device.Call("org.bluez.Device1.Connect", 0).Err
-		if err != nil {
-			close(cancelChan)
-			d.bus.Close()
-			return fmt.Errorf("bluetooth: failed to connect to device: %w", err)
-		}
-		<-connectChan
+	connectChan := d.watchForConnection()
+
+	// Connect to the device
+	err = d.device.Call("org.bluez.Device1.Connect", 0).Err
+	if err != nil {
+		d.bus.Close()
+		return fmt.Errorf("bluetooth: failed to connect to device: %w", err)
+	}
+	select {
+	case <-connectChan:
+		d.Connected = true
+	case <-d.ctx.Done():
+		d.bus.Close()
+		return d.ctx.Err()
 	}
 
 	return nil
@@ -322,7 +336,7 @@ func (d *Device) connect() error {
 // Parameters:
 //   - signal: A channel of dbus signals to listen for property change signals.
 //   - connectChan: A channel used to notify when the device is connected.
-func (d *Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}, cancelChan chan struct{}) {
+func (d *Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan chan struct{}) {
 	propertiesChangedMatchOptions := []dbus.MatchOption{
 		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 		dbus.WithMatchObjectPath(d.device.Path()),
@@ -333,7 +347,7 @@ func (d *Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan c
 
 	for {
 		select {
-		case <-cancelChan:
+		case <-d.ctx.Done():
 			return
 		case sig := <-signal:
 			if sig.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
@@ -359,7 +373,6 @@ func (d *Device) watchForPropertyChanges(signal chan *dbus.Signal, connectChan c
 					d.bus.Close()
 					return
 				}
-
 			}
 		}
 	}
@@ -377,7 +390,10 @@ func parseSignal(sig *dbus.Signal) (interfaceName string, changes map[string]dbu
 func (d Device) Disconnect() error {
 	// we don't call our cancel function here, instead we wait for the
 	// property change in `watchForConnect` and cancel things then
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, cancel := context.WithTimeout(d.ctx, time.Second*5)
 	defer cancel()
-	return d.device.CallWithContext(ctx, "org.bluez.Device1.Disconnect", 0).Err
+	err := d.device.CallWithContext(ctx, "org.bluez.Device1.Disconnect", 0).Err
+	d.cancel()
+
+	return err
 }
